@@ -1,0 +1,15 @@
+---
+dependencies: []
+
+galaxy_info:
+  author: Sathish Kumar G
+  description: Role for Kubernetes cluster setup
+  min_ansible_version: 2.9
+  platforms:
+    - name: Rocky
+      versions:
+        - 9
+    - name: Ubuntu
+      versions:
+        - 22.04
+   

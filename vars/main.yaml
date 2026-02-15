@@ -1,0 +1,12 @@
+# Load Balancer IP for Kubernetes Multi-Node Cluster
+k8s_lb_ip: 
+
+# Kubernetes version to install
+k8s_version: 1.34.3
+
+# Type of Kubernetes cluster to deploy (single-node or multi-node)
+cluster_type: single-node
+
+public_ip: 13.203.87.197
+
+pod_network_cidr: 10.244.0.0/16

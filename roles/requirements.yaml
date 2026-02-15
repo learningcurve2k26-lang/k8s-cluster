@@ -1,0 +1,12 @@
+---
+- name: k8s_installation
+  src: https://github.com/sathishkumarg-025/HA-k8s-cluster.git
+  scm: git
+  version: k8s-cluster
+  path: roles/k8s_installation
+
+- name: k8s_cluster
+  src: https://github.com/sathishkumarg-025/HA-k8s-cluster.git
+  scm: git
+  version: k8s-cluster
+  path: roles/k8s_cluster

@@ -1,0 +1,34 @@
+---
+- name: Configure Single Node Cluster
+  hosts: single_node_cluster
+  become: yes
+  vars_files:
+    - vars/main.yaml
+  tasks:
+    - name: K8s installation single node
+      ansible.builtin.import_role:
+        name: k8s_installation
+      when: cluster_type == "single-node"  
+      tags: k8s_installation
+    - name: K8s cluster single node
+      ansible.builtin.import_role:
+        name: k8s_cluster
+      when: cluster_type == "single-node"
+      tags: k8s_cluster
+
+- name: Configure Multi Node Cluster
+  hosts: multi_node_cluster
+  become: yes
+  vars_files:
+    - vars/main.yaml
+  tasks:
+    - name: K8s installation multi node
+      ansible.builtin.import_role:
+        name: k8s_installation
+      when: cluster_type == "multi-node"
+      tags: k8s_installation
+    - name: K8s cluster multi node
+      ansible.builtin.import_role:
+        name: k8s_cluster
+      when: cluster_type == "multi-node"
+      tags: k8s_cluster

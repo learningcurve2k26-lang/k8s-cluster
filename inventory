@@ -1,0 +1,18 @@
+[single_node_cluster]
+my-node
+# Multi-Node Cluster
+[master_node_1]
+
+
+[other_master_nodes]
+
+
+
+#[workers]
+
+
+
+[multi-node-cluster:children]
+master_node_1
+other_master_nodes
+#workers

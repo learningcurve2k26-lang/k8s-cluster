@@ -1,0 +1,225 @@
+---
+- name: Set Kubernetes major.minor version as a fact
+  set_fact:
+    k8s_repo_version: "{{ k8s_version.split('.')[0] }}.{{ k8s_version.split('.')[1] }}"
+
+- name: Create /etc/yum.repos.d/kubernetes.repo (RedHat)
+  blockinfile:
+    dest: /etc/yum.repos.d/kubernetes.repo
+    create: yes
+    block: |
+      [kubernetes]
+      name=Kubernetes
+      baseurl=https://pkgs.k8s.io/core:/stable:/v{{ k8s_repo_version }}/rpm/
+      enabled=1
+      gpgcheck=1
+      repo_gpgcheck=1
+      gpgkey=https://pkgs.k8s.io/core:/stable:/v{{ k8s_repo_version }}/rpm/repodata/repomd.xml.key
+      exclude=kubelet kubeadm kubectl cri-tools kubernetes-cni
+  when: ansible_os_family == "RedHat" 
+
+- name: Add Kubernetes repository key (Debian) 
+  shell: |
+    mkdir -p /etc/apt/keyrings
+    curl -fsSL https://pkgs.k8s.io/core:/stable:/v{{ k8s_repo_version }}/deb/Release.key | gpg --dearmor -o /etc/apt/keyrings/kubernetes-apt-keyring.gpg
+  args:
+    creates: /etc/apt/keyrings/kubernetes-apt-keyring.gpg
+  when: ansible_os_family == "Debian"
+
+- name: Create /etc/apt/sources.list.d/kubernetes.list (Debian)
+  blockinfile:
+    dest: /etc/apt/sources.list.d/kubernetes.list
+    create: yes
+    block: |
+      deb [signed-by=/etc/apt/keyrings/kubernetes-apt-keyring.gpg] https://pkgs.k8s.io/core:/stable:/v{{ k8s_repo_version }}/deb/ /
+  when: ansible_os_family == "Debian"
+
+- name: Create /etc/modules-load.d/containerd.conf
+  blockinfile:
+    dest: /etc/modules-load.d/containerd.conf
+    create: yes
+    block: |
+      overlay
+      br_netfilter
+
+- name: Add containerd conf settings to modprobe
+  shell: |
+    modprobe overlay
+    modprobe br_netfilter
+
+- name: Create /etc/sysctl.d/99-kubernetes-cri.conf
+  blockinfile:
+    dest: /etc/sysctl.d/99-kubernetes-cri.conf
+    create: yes
+    block: |
+      net.bridge.bridge-nf-call-iptables  = 1
+      net.ipv4.ip_forward                 = 1
+      net.bridge.bridge-nf-call-ip6tables = 1
+
+- name: Load settings from all system configuration files using sysctl
+  command: sysctl --system
+
+- name: Install lvm2 and device-mapper-persistent-data yum-utils package (RedHat)
+  yum:
+    name:
+      - yum-utils
+      - device-mapper-persistent-data
+      - lvm2
+    state: present
+  when: ansible_os_family == "RedHat"
+
+- name: Install prerequisites (Debian)
+  apt:
+    name:
+      - apt-transport-https
+      - ca-certificates
+      - curl
+      - gnupg
+      - lsb-release
+    state: present
+  when: ansible_os_family == "Debian"
+
+- name: Add docker-ce.repo (RedHat)
+  command: yum-config-manager --add-repo https://download.docker.com/linux/rhel/docker-ce.repo
+  when: ansible_os_family == "RedHat"
+
+- name: Add docker-ce repository key (Debian/Ubuntu)
+  shell: |
+    mkdir -p /etc/apt/keyrings
+    if [ -f /etc/lsb-release ] && grep -q Ubuntu /etc/lsb-release; then
+      curl -fsSL --connect-timeout 30 --max-time 60 https://download.docker.com/linux/ubuntu/gpg | gpg --dearmor -o /etc/apt/keyrings/docker.gpg
+    else
+      curl -fsSL --connect-timeout 30 --max-time 60 https://download.docker.com/linux/debian/gpg | gpg --dearmor -o /etc/apt/keyrings/docker.gpg
+    fi
+  args:
+    creates: /etc/apt/keyrings/docker.gpg
+  when: ansible_os_family == "Debian"
+
+- name: Add docker-ce.list (Debian/Ubuntu)
+  shell: |
+    if [ -f /etc/lsb-release ] && grep -q Ubuntu /etc/lsb-release; then
+      echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu $(lsb_release -cs) stable" | tee /etc/apt/sources.list.d/docker.list > /dev/null
+    else
+      echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/debian $(lsb_release -cs) stable" | tee /etc/apt/sources.list.d/docker.list > /dev/null
+    fi
+  when: ansible_os_family == "Debian"
+
+- name: Update apt cache (Debian)
+  apt:
+    update_cache: yes
+  when: ansible_os_family == "Debian"
+
+- name: Install containerd (RedHat)
+  yum:
+    name: containerd.io
+    state: present
+  when: ansible_os_family == "RedHat"
+
+- name: Install containerd (Debian)
+  apt:
+    name: containerd.io
+    state: present
+  when: ansible_os_family == "Debian"
+
+- name: Configure containerd default config
+  shell: |
+    mkdir -p /etc/containerd
+    [ ! -f /etc/containerd/config.toml.bak ] && [ -f /etc/containerd/config.toml ] && cp /etc/containerd/config.toml /etc/containerd/config.toml.bak || true
+    containerd config default > /etc/containerd/config.toml
+
+- name: Set SystemdCgroup to true in containerd config
+  shell: |
+    sed -i 's/SystemdCgroup = false/SystemdCgroup = true/g' /etc/containerd/config.toml
+
+- name: Enable and restart containerd using systemctl
+  shell: |
+    systemctl enable containerd
+    systemctl restart containerd
+
+- name: Install crictl (RedHat)
+  shell: |
+    yum install -y wget
+    wget https://github.com/kubernetes-sigs/cri-tools/releases/download/v{{ k8s_repo_version }}.0/crictl-v{{ k8s_repo_version }}.0-linux-amd64.tar.gz
+    zcat crictl-v{{ k8s_repo_version }}.0-linux-amd64.tar.gz | tar xf -
+    mv crictl /usr/bin/
+  when: ansible_os_family == "RedHat"
+
+- name: Install crictl (Debian)
+  shell: |
+    apt-get install -y wget
+    wget https://github.com/kubernetes-sigs/cri-tools/releases/download/v{{ k8s_repo_version }}.0/crictl-v{{ k8s_repo_version }}.0-linux-amd64.tar.gz
+    zcat crictl-v{{ k8s_repo_version }}.0-linux-amd64.tar.gz | tar xf -
+    mv crictl /usr/bin/
+  when: ansible_os_family == "Debian"
+
+- name: Validate if crictl installed in correct path
+  command: crictl
+  register: crictl_run_result
+
+- name: Add /etc/crictl.yaml
+  blockinfile:
+    dest: /etc/crictl.yaml
+    create: yes
+    block: |
+      runtime-endpoint: unix:///run/containerd/containerd.sock
+      image-endpoint: unix:///run/containerd/containerd.sock
+      timeout: 10
+      debug: true
+
+- name: Disable cri plugin in containerd config.toml
+  shell: |
+    sed -i "s/disabled_plugins/# disabled_plugins/g" /etc/containerd/config.toml
+
+- name: Reload and restart containerd using systemctl
+  shell: |
+    systemctl daemon-reload
+    systemctl restart containerd
+
+- name: Validate if crictl image ls works
+  shell: |
+    crictl image ls
+
+- name: Validate that crictl can pull various images
+  shell: |
+    crictl pull busybox
+
+- name: Remove busybox and crictl tar after validation
+  shell: |
+    crictl rmi busybox
+    rm -f crictl-v{{ k8s_repo_version }}.0-linux-amd64.tar.gz
+
+- name: Set SELINUX settings from enforcing to permissive (RedHat)
+  command: sed -i 's/^SELINUX=enforcing$/SELINUX=permissive/' /etc/selinux/config
+  when: ansible_os_family == "RedHat"
+
+- name: Create /etc/sysctl.d/k8s.conf
+  blockinfile:
+    dest: /etc/sysctl.d/k8s.conf
+    create: yes
+    block: |
+      net.bridge.bridge-nf-call-ip6tables = 1
+      net.bridge.bridge-nf-call-iptables = 1
+
+- name: Check if kubelet is already installed
+  command: which kubelet
+  register: kubelet_installed
+  ignore_errors: yes
+  changed_when: false
+
+- name: Install Kubernetes components (RedHat)
+  shell: |
+    sysctl --system
+    swapoff -a
+    yum install -y kubelet-{{ k8s_version }} kubeadm-{{ k8s_version }} kubectl-{{ k8s_version }} --disableexcludes=kubernetes
+    systemctl enable kubelet.service
+    setenforce 0
+  when: ansible_os_family == "RedHat" and kubelet_installed.rc != 0
+
+- name: Install Kubernetes components (Debian)
+  shell: |
+    sysctl --system
+    swapoff -a
+    apt-get install -y kubelet kubeadm kubectl
+    systemctl enable kubelet.service
+  when: ansible_os_family == "Debian" and kubelet_installed.rc != 0
+

@@ -1,0 +1,175 @@
+---
+- name: Create user and group for kubeconfig
+  block:
+    - name: Create group for kubeconfig
+      group:
+        name: sathish
+        state: present
+
+    - name: Create user for kubeconfig
+      user:
+        name: sathish
+        group: sathish
+        create_home: yes
+        shell: /bin/bash
+        state: present
+  when: "'master_node_1' in group_names or 'other_master_nodes' in group_names or 'single_node_cluster' in group_names"
+
+- name: Configure Single Node Cluster
+  block:
+    - name: Set control plane endpoint IP
+      set_fact:
+        control_plane_ip: "{{ public_ip | default(ansible_default_ipv4.address) }}"
+
+    - name: Initialize the master node
+      shell: sudo kubeadm init --kubernetes-version "{{ k8s_version }}" --cri-socket unix:///run/containerd/containerd.sock --pod-network-cidr={{ pod_network_cidr }} --token-ttl 0 --control-plane-endpoint={{ control_plane_ip }}:6443 --skip-phases=addon/kube-proxy
+      args:
+        chdir: $HOME
+      async: 350
+      poll: 60
+
+    # - name: Apply a flannel manifest to initialize the pod network
+    #   shell: KUBECONFIG=/etc/kubernetes/admin.conf kubectl apply --validate=false -f https://raw.githubusercontent.com/coreos/flannel/master/Documentation/kube-flannel.yml
+
+    - name: Remove taint from single node to allow pod scheduling
+      shell: kubectl taint nodes --all node-role.kubernetes.io/control-plane:NoSchedule-
+      environment:
+        KUBECONFIG: /etc/kubernetes/admin.conf
+        
+  rescue:
+    - name: Reset kubeadm on failure
+      shell: |
+        kubeadm reset -f
+        rm -rf /etc/kubernetes /var/lib/kubelet /var/lib/etcd ~/.kube
+      ignore_errors: yes
+
+    - name: Clean up CNI config on failure
+      file:
+        path: /etc/cni/net.d
+        state: absent
+      ignore_errors: yes
+
+    - name: Fail with message after reset
+      fail:
+        msg: "kubeadm join failed on single node cluster. Node has been reset. Please re-run the playbook."
+  when: cluster_type == "single-node" and "'single_node_cluster' in group_names"
+
+- name: Configure Multi-Node Cluster
+  block:
+    - name: Configure Master node 1
+      block:
+        - name: Start the master node 1
+          shell: sudo kubeadm init --kubernetes-version "{{ k8s_version }}" --cri-socket unix:///run/containerd/containerd.sock --upload-certs --pod-network-cidr={{ pod_network_cidr }} --token-ttl 0 --control-plane-endpoint={{ k8s_lb_ip }}:6443 --skip-phases=addon/kube-proxy
+          args:
+            chdir: $HOME
+          async: 350
+          poll: 60
+
+        # - name: Apply a flannel manifest to initialize the pod network
+        #   shell: KUBECONFIG=/etc/kubernetes/admin.conf kubectl apply --validate=false -f https://raw.githubusercontent.com/coreos/flannel/master/Documentation/kube-flannel.yml
+
+        - name: Create a new certificate key for master for generating master join command
+          command: kubeadm init phase upload-certs --upload-certs
+          register: join_certificate_key
+
+        - name: Generate master join command
+          command: kubeadm token create --print-join-command --certificate-key "{{ join_certificate_key.stdout_lines[2] }}"
+          register: join_master_command
+
+        - name: Get the join command to be used by the worker
+          shell: kubeadm token create --print-join-command
+          register: kube_join_command
+
+        - name: Set fact for master join command
+          ansible.builtin.set_fact:
+            master_join_command: "{{ join_master_command.stdout_lines[0] }}"
+            cacheable: yes
+
+        - name: Set fact for worker join command
+          ansible.builtin.set_fact:
+            worker_join_command: "{{ kube_join_command.stdout_lines[0] }}"
+            cacheable: yes
+      rescue:
+        - name: Reset kubeadm on failure
+          shell: |
+            kubeadm reset -f
+            rm -rf /etc/kubernetes /var/lib/kubelet /var/lib/etcd ~/.kube
+          ignore_errors: yes
+
+        - name: Clean up CNI config on failure
+          file:
+            path: /etc/cni/net.d
+            state: absent
+          ignore_errors: yes
+
+        - name: Fail with message after reset
+          fail:
+            msg: "kubeadm join failed on master node 1. Node has been reset. Please re-run the playbook."
+      when: "'master_node_1' in group_names"
+
+    - name: Configure other control planes
+      block:
+        - name: Join other master nodes to the cluster
+          command: "{{ hostvars[groups['master_node_1'][0]].master_join_command }}"
+          register: join_master_command
+      rescue:
+        - name: Reset kubeadm on failure
+          shell: |
+            kubeadm reset -f
+            rm -rf /etc/kubernetes /var/lib/kubelet /var/lib/etcd ~/.kube
+          ignore_errors: yes
+
+        - name: Clean up CNI config on failure
+          file:
+            path: /etc/cni/net.d
+            state: absent
+          ignore_errors: yes
+
+        - name: Fail with message after reset
+          fail:
+            msg: "kubeadm join failed on other master node. Node has been reset. Please re-run the playbook."
+      when: "'other_master_nodes' in group_names"
+
+    - name: Configure worker nodes
+      block:
+        - name: Join worker nodes to the cluster
+          command: "{{ hostvars[groups['master_node_1'][0]].worker_join_command }}"
+
+      rescue:
+        - name: Reset kubeadm on failure
+          shell: |
+            kubeadm reset -f
+            rm -rf /etc/kubernetes /var/lib/kubelet /var/lib/etcd ~/.kube
+          ignore_errors: yes
+
+        - name: Clean up CNI config on failure
+          file:
+            path: /etc/cni/net.d
+            state: absent
+          ignore_errors: yes
+
+        - name: Fail with message after reset
+          fail:
+            msg: "kubeadm join failed on worker node. Node has been reset. Please re-run the playbook."
+
+  when: cluster_type == "multi-node"
+
+- name: Setup kubeconfig for all master nodes
+  block:
+    - name: Create .kube directory
+      file:
+        path: "/home/sathish/.kube"
+        state: directory
+        owner: "sathish"
+        group: "sathish"
+        mode: "0750"
+
+    - name: Copy kube config
+      copy:
+        src: "/etc/kubernetes/admin.conf"
+        dest: "/home/sathish/.kube/config"
+        remote_src: yes
+        owner: "sathish"
+        group: "sathish"
+        mode: "0640"
+  when: "'master_node_1' in group_names or 'other_master_nodes' in group_names or 'single_node_cluster' in group_names"
